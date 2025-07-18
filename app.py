@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from huggingface_hub import InferenceClient
+import requests
 
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = "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"
-client = InferenceClient(provider="novita", api_key=API_KEY)
+# Ollama API configuration
+OLLAMA_API_URL = "http://localhost:11434/api/chat"
+MODEL_NAME = "llama3.2:1b"
 
 # HTML template for the chat UI
 CHAT_HTML = '''
@@ -951,30 +952,49 @@ def chat():
     if not messages or not isinstance(messages, list):
         return jsonify({"error": "Missing or invalid 'messages' list."}), 400
     
-    # Simple but effective system prompt
-    enhanced_messages = [
-        {
+    # Add system prompt if not present
+    if not any(m["role"] == "system" for m in messages):
+        messages = [{
             "role": "system",
             "content": (
-"You are a highly advanced AI assistant designed to engage in natural, human-like conversations. "
-"Your responses should be informative, friendly, and contextually relevant. "
-"Always provide accurate information and clarify any ambiguities. "
-"Use a tone that is respectful and engaging, and avoid overly technical jargon unless specifically requested. "
-"You can also handle creative tasks and provide suggestions based on user input. "
-"Remember to maintain user privacy and confidentiality in all interactions."
+                "You are a highly advanced AI assistant designed to engage in natural, human-like conversations. "
+                "Your responses should be informative, friendly, and contextually relevant. "
+                "Always provide accurate information and clarify any ambiguities. "
+                "Use a tone that is respectful and engaging, and avoid overly technical jargon unless specifically requested. "
+                "You can also handle creative tasks and provide suggestions based on user input. "
+                "Remember to maintain user privacy and confidentiality in all interactions."
             )
+        }] + messages
+    
+    # Prepare payload for Ollama API
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "num_predict": 1024
         }
-    ] + messages
+    }
     
     try:
-        completion = client.chat.completions.create(
-            model="deepseek-ai/DeepSeek-V3",
-            messages=enhanced_messages,
-            temperature=0.7,
-            max_tokens=800,
-        )
-        reply = completion.choices[0].message
-        return jsonify({"reply": reply})
+        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Extract the response content from Ollama API
+        reply_content = data.get("message", {}).get("content", "")
+        
+        if not reply_content:
+            return jsonify({"error": "No response from Ollama server"}), 500
+            
+        return jsonify({"reply": {"content": reply_content}})
+        
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cannot connect to Ollama server. Please make sure Ollama is running and the llama3.2:1b model is loaded."}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Request timeout. The model is taking too long to respond."}), 408
     except Exception as e:
         print(f"Chat error: {e}")
         return jsonify({"error": f"عذراً، حدث خطأ في الاتصال: {str(e)}. يرجى المحاولة مرة أخرى."}), 500
