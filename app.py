@@ -1,6 +1,13 @@
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import requests
+import arabic_reshaper
+from bidi.algorithm import get_display
+from functools import lru_cache
+import pyarabic.arabrepr as arabrepr
+import time
+import json
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -9,7 +16,183 @@ CORS(app)
 OLLAMA_API_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "llama3.2:1b"
 
-# HTML template for the chat UI
+# Arabic NLP Tools Initialization (Mock implementations - replace with actual in production)
+class FarasaSegmenter:
+    def __init__(self, interactive=True):
+        pass
+    
+    def segment(self, text):
+        return text  # In production, replace with actual segmentation
+
+farasa_segmenter = FarasaSegmenter(interactive=True)
+
+# Arabic Text Processing Functions
+def preprocess_arabic(text):
+    """Prepare Arabic text for proper display"""
+    reshaped_text = arabic_reshaper.reshape(text)
+    return get_display(reshaped_text)
+
+def postprocess_response(response):
+    """Correct common Arabic mistakes and enhance readability"""
+    corrections = {
+        "هاذا": "هذا",
+        "عربيى": "عربي",
+        "يإ": "يا",
+        "الذى": "الذي",
+        "إنة": "إنه",
+        "هذة": "هذه",
+        "فى": "في",
+        "إى": "إلى",
+        "ة": "ه",  # Correct ta marbuta
+        # Add more common corrections as needed
+    }
+    for wrong, correct in corrections.items():
+        response = response.replace(wrong, correct)
+    return response
+
+def enhance_arabic_response(response):
+    """Apply Arabic-specific enhancements to the response"""
+    # Segment the text (would be more effective with actual Farasa)
+    segmented = farasa_segmenter.segment(response)
+    # Apply Arabic-specific formatting for display
+    enhanced = preprocess_arabic(segmented)
+    return enhanced
+
+# Caching System for Common Questions
+@lru_cache(maxsize=1000)
+def get_cached_response(question):
+    """Cache optimized answers for common questions"""
+    common_answers = {
+        # --- Mathematics & Geometry ---
+        "ما هي نظرية فيثاغورس؟ وكيف يمكن تطبيقها في الحياة العملية؟": (
+            "✨ **نظرية فيثاغورس الرياضية وأهميتها التطبيقية** ✨\n\n"
+            "تنص النظرية على أنه في المثلث القائم الزاوية:\n"
+            "«مربع الوتر = مجموع مربعي الضلعين الآخرين»\n\n"
+            "**الصيغة الرياضية**:\n"
+            "إذا كان △ABC قائمًا في B، فإن:\n"
+            "AB² + BC² = AC²\n\n"
+            "**تطبيقات عملية مذهلة**:\n"
+            "- حساب أطوال الأراضي في المساحة\n"
+            "- تصميم المنحدرات الهندسية (مثل السلالم)\n"
+            "- في الملاحة لتحديد المسافات القصيرة\n\n"
+            "مثال تفاعلي:\n"
+            "إذا كان طول AB = 5 سم و BC = 12 سم، فما طول الوتر؟\n"
+            "الحل: AC² = 5² + 12² = 25 + 144 = 169 → AC = √169 = 13 سم"
+        ),
+
+        "كيف يمكن حل معادلة من الدرجة الثانية باستخدام القانون العام؟": (
+            "🔍 **الدليل الشامل لحل المعادلات التربيعية** 🔍\n\n"
+            "لحل المعادلة: ax² + bx + c = 0:\n"
+            "1. احسب المميز (Δ) = b² - 4ac\n"
+            "2. إذا كان Δ > 0: يوجد جذران حقيقيان مختلفان\n"
+            "3. إذا كان Δ = 0: يوجد جذر مكرر\n"
+            "4. إذا كان Δ < 0: لا يوجد جذور حقيقية (الحلول مركبة)\n\n"
+            "**القانون العام**:\n"
+            "x = [-b ± √(b² - 4ac)] / 2a\n\n"
+            "مثال تطبيقي:\n"
+            "حل المعادلة: x² - 5x + 6 = 0\n"
+            "Δ = 25 - 24 = 1 → الجذور: x = [5 ± √1]/2\n"
+            "إذن: x₁ = 3, x₂ = 2"
+        ),
+
+        # --- Arabic Language & Grammar ---
+        "ما الفرق بين 'إنّ' و'أنّ' في اللغة العربية؟ وكيف نستخدمهما؟": (
+            "�� **الفرق الدقيق بين «إنّ» و«أنّ» في النحو العربي** ��\n\n"
+            "1. **إنّ**: حرف توكيد ونصب (يُدخل على الجملة الاسمية)\n"
+            "   - مثال: «إنّ العلمَ نورٌ» (تنصب المبتدأ «العلم»)\n"
+            "   - تُستخدم في بداية الجمل الخبرية\n\n"
+            "2. **أنّ**: حرف مصدري ونصب (يُؤوّل الفعل بعدها إلى مصدر)\n"
+            "   - مثال: «أريدُ أن تذاكرَ» (تذاكرَ = مصدر مؤول)\n"
+            "   - تدخل على الجمل الفعلية في المواضيع التالية:\n"
+            "     - بعد الأفعال (أراد، تمنى...)\n"
+            "     - بعد حروف الجر (على أن، من أن...)\n\n"
+            "💡 **خدعة ذكية**: إذا أردت اختبارهما، استبدل بـ «اعلم أنّ» – إذا صحت الجملة فهي «أنّ»!"
+        ),
+
+        "كيف نفرق بين المفعول المطلق والمفعول لأجله؟": (
+            "⚖️ **التمييز بين المفعولين بأمثلة تطبيقية** ⚖️\n\n"
+            "1. **المفعول المطلق**:\n"
+            "   - يُذكر لتأكيد الفعل أو بيان نوعه/عدده\n"
+            "   - مثال: «ضحك الطفل ضحكًا» (تأكيد)\n"
+            "   - مثال: «قرأت الكتاب قراءتين» (عدد)\n\n"
+            "2. **المفعول لأجله**:\n"
+            "   - يُذكر لبيان سبب الفعل (ويجب أن يكون مصدرًا قلبيا)\n"
+            "   - مثال: «سافر سعيًا وراء الرزق» (السبب = طلب الرزق)\n\n"
+            "🎯 **اختبار سريع**:\n"
+            "في جملة «جرى العداء جريًا سريعًا»، ما نوع المفعول؟\n"
+            "الإجابة: مفعول مطلق (بيان النوع)"
+        ),
+
+        # --- Science & Biology ---
+        "ما هي مراحل دورة الماء في الطبيعة؟": (
+            "🌧️ **رحلة قطرة الماء من الأرض إلى السماء والعودة** 🌧️\n\n"
+            "1. **التبخر**: تحول الماء إلى بخار بفعل حرارة الشمس\n"
+            "2. **التكاثف**: تكوّن الغيوم عند ارتفاع البخار وبرودته\n"
+            "3. **الهطول**: نزول المطر/الثلج/البرد من الغيوم\n"
+            "4. **التسرب**: تغلغل الماء في التربة أو الجريان السطحي\n"
+            "5. **التجمّع**: وصول الماء إلى الأنهار/المحيطات/المياه الجوفية\n\n"
+            "💦 **حقيقة مثيرة**: 97% من مياه الأرض مالحة، و3% فقط عذبة!"
+        ),
+
+        "كيف تعمل الخلايا العصبية في جسم الإنسان؟": (
+            "⚡ **أسرار نقل الإشارات العصبية بكفاءة مذهلة** ⚡\n\n"
+            "1. **المكونات الرئيسية**:\n"
+            "   - جسم الخلية (يحتوي النواة)\n"
+            "   - الزوائد الشجيرية (تستقبل الإشارات)\n"
+            "   - المحور العصبي (ينقل الإشارات كهربائيًا)\n\n"
+            "2. **آلية العمل**:\n"
+            "   - تنتقل الإشارة عبر جهد الفعل (Action Potential)\n"
+            "   - تفرز النواقل العصبية (مثل الدوبامين) عند المشابك\n"
+            "   - تصل السرعة إلى 120 م/ث!\n\n"
+            "🧠 **معلومة ذهبية**: الدماغ يحتوي على ~86 مليار خلية عصبية!"
+        ),
+
+        # --- History & Culture ---
+        "من هم أهم شعراء العصر الجاهلي؟ وما خصائص شعرهم؟": (
+            "🏛️ **عباقرة الشعر الجاهلي وأسلوبهم الخالد** 🏛️\n\n"
+            "أشهر الشعراء:\n"
+            "- **امرؤ القيس**: سيد شعراء الغزل والوقوف على الأطلال\n"
+            "- **عنترة بن شداد**: فارس الشعراء (مزج بين الفخر والغزل)\n"
+            "- **زهير بن أبي سلمى**: حكيم الشعراء (أشهر قصائده «اللامية»)\n\n"
+            "📜 **خصائص الشعر الجاهلي**:\n"
+            "1. الصدق في التعبير\n"
+            "2. الاعتماد على الصور الحسية (الفرس، البرق...)\n"
+            "3. التنوع بين الغزل، الفخر، الحكمة، الوصف"
+        ),
+
+        # --- Creative & Critical Thinking ---
+        "كيف يمكن استخدام البلاغة العربية في الإقناع؟": (
+            "🎭 **فنون البلاغة العربية: بين المنطق والعاطفة** 🎭\n\n"
+            "1. **الجناس**: تشابه لفظين مع اختلاف المعنى\n"
+            "   - مثال: «العلم في الصغر كالنقش على الحجر»\n\n"
+            "2. **الطباق**: الجمع بين الضدين\n"
+            "   - مثال: «ومن يجعل المعروف في غير أهله يكن حمده ذمًا عليه ويندم»\n\n"
+            "3. **التشبيه البليغ**: تقريب الفكرة بالصور المحسوسة\n"
+            "   - مثال: «الشجاع كالأسد»\n\n"
+            "🔥 **نصيحة عملية**: استخدم «السجع» (توازن الفواصل) في الخطابات!"
+        )
+    }
+    return common_answers.get(question.strip().lower(), None)
+
+# Load knowledge base
+KNOWLEDGE_BASE = []
+if os.path.exists('knowledge_base.json'):
+    with open('knowledge_base.json', encoding='utf-8') as f:
+        KNOWLEDGE_BASE = json.load(f)
+
+def search_knowledge_base(question):
+    q = question.strip().lower()
+    for item in KNOWLEDGE_BASE:
+        if item.get('question', '').strip().lower() == q:
+            return item.get('answer')
+    return None
+
+# Enhanced System Prompt in Arabic
+ENHANCED_SYSTEM_PROMPT = """
+You are a helpfull AI, you can talk friendly and helpfull.
+"""
+
+# HTML template remains the same as in your original code
 CHAT_HTML = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -343,18 +526,6 @@ CHAT_HTML = '''
             display: flex;
             align-items: flex-end;
             gap: 12px;
-            animation: slideIn 0.3s ease-out;
-        }
-
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
         }
 
         .message.user {
@@ -849,6 +1020,38 @@ CHAT_HTML = '''
             }
         }
 
+        function typeWriterEffect(role, content) {
+            hideTypingIndicator(); // Hide typing indicator immediately before typing starts
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.innerHTML = '<i class="fas fa-robot"></i>';
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            const textDiv = document.createElement('div');
+            textDiv.className = 'message-text';
+            contentDiv.appendChild(textDiv);
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'message-time';
+            timeDiv.textContent = new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' });
+            contentDiv.appendChild(timeDiv);
+            messageDiv.appendChild(avatar);
+            messageDiv.appendChild(contentDiv);
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            let i = 0;
+            function typeChar() {
+                if (i < content.length) {
+                    textDiv.textContent += content.charAt(i);
+                    i++;
+                    setTimeout(typeChar, 15); // Speed of typing (ms per character)
+                }
+            }
+            typeChar();
+        }
+
         chatForm.addEventListener('submit', async function(e) {
             e.preventDefault();
             const userMsg = chatInput.value.trim();
@@ -870,17 +1073,15 @@ CHAT_HTML = '''
                 });
                 
                 const data = await res.json();
-                hideTypingIndicator();
                 
                 if (data.reply && data.reply.content) {
-                    addMessage('ai', data.reply.content);
+                    typeWriterEffect('ai', data.reply.content);
                     messages.push({ role: 'assistant', content: data.reply.content });
                 } else {
-                    addMessage('ai', 'عذراً، حدث خطأ في الرد. يرجى المحاولة مرة أخرى.');
+                    typeWriterEffect('ai', 'عذراً، حدث خطأ في الرد. يرجى المحاولة مرة أخرى.');
                 }
             } catch (err) {
-                hideTypingIndicator();
-                addMessage('ai', 'تعذر الاتصال بالخادم. يرجى التحقق من اتصالك بالإنترنت.');
+                typeWriterEffect('ai', 'تعذر الاتصال بالخادم. يرجى التحقق من اتصالك بالإنترنت.');
             }
             
             setLoading(false);
@@ -948,23 +1149,27 @@ def index():
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.get_json()
-    messages = data.get('messages')
-    if not messages or not isinstance(messages, list):
-        return jsonify({"error": "Missing or invalid 'messages' list."}), 400
+    messages = data.get('messages', [])
     
-    # Add system prompt if not present
+    # Validate messages
+    if not messages or not isinstance(messages, list):
+        return jsonify({"error": "قائمة الرسائل مفقودة أو غير صالحة"}), 400
+    
+    # Check for cached response for the last user message
+    if messages and messages[-1]['role'] == 'user':
+        user_question = messages[-1]['content']
+        # First, check the knowledge base
+        kb_answer = search_knowledge_base(user_question)
+        if kb_answer:
+            return jsonify({"reply": {"content": kb_answer}})
+        # Then, check the old cache
+        cached_response = get_cached_response(user_question.lower().strip())
+        if cached_response:
+            return jsonify({"reply": {"content": cached_response}})
+    
+    # Prepare messages with enhanced system prompt
     if not any(m["role"] == "system" for m in messages):
-        messages = [{
-            "role": "system",
-            "content": (
-                "You are a highly advanced AI assistant designed to engage in natural, human-like conversations. "
-                "Your responses should be informative, friendly, and contextually relevant. "
-                "Always provide accurate information and clarify any ambiguities. "
-                "Use a tone that is respectful and engaging, and avoid overly technical jargon unless specifically requested. "
-                "You can also handle creative tasks and provide suggestions based on user input. "
-                "Remember to maintain user privacy and confidentiality in all interactions."
-            )
-        }] + messages
+        messages = [{"role": "system", "content": ENHANCED_SYSTEM_PROMPT}] + messages
     
     # Prepare payload for Ollama API
     payload = {
@@ -974,30 +1179,50 @@ def chat():
         "options": {
             "temperature": 0.7,
             "top_p": 0.9,
-            "num_predict": 1024
+            "num_predict": 100000,  # Increased token limit
+            "stop": ["\n\n", "###", "User:"]
         }
     }
     
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
+        start_time = time.time()
+        response = requests.post(OLLAMA_API_URL, json=payload, timeout=200) # Increased timeout
         response.raise_for_status()
         data = response.json()
         
-        # Extract the response content from Ollama API
-        reply_content = data.get("message", {}).get("content", "")
+        # Process the response
+        reply_content = data.get("message", {}).get("content", "").strip()
         
         if not reply_content:
-            return jsonify({"error": "No response from Ollama server"}), 500
-            
-        return jsonify({"reply": {"content": reply_content}})
+            return jsonify({"error": "لا توجد استجابة من خادم Ollama"}), 500
+        
+        # Apply Arabic typo corrections only
+        reply_content = postprocess_response(reply_content)
+        
+        # Log performance
+        processing_time = time.time() - start_time
+        app.logger.info(f"Processed Arabic response in {processing_time:.2f} seconds")
+        
+        return jsonify({
+            "reply": {
+                "content": reply_content,
+                "processing_time": processing_time
+            }
+        })
         
     except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Cannot connect to Ollama server. Please make sure Ollama is running and the llama3.2:1b model is loaded."}), 503
+        return jsonify({
+            "error": "تعذر الاتصال بخادم Ollama. يرجى التأكد من تشغيل Ollama وأن النموذج محمل."
+        }), 503
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Request timeout. The model is taking too long to respond."}), 408
+        return jsonify({
+            "error": "انتهت مهلة الانتظار. النموذج يأخذ وقتًا طويلاً للرد."
+        }), 408
     except Exception as e:
-        print(f"Chat error: {e}")
-        return jsonify({"error": f"عذراً، حدث خطأ في الاتصال: {str(e)}. يرجى المحاولة مرة أخرى."}), 500
+        app.logger.error(f"Chat error: {str(e)}")
+        return jsonify({
+            "error": f"عذرًا، حدث خطأ: {str(e)}. يرجى المحاولة مرة أخرى."
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
